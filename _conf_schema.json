@@ -1,0 +1,197 @@
+{
+  "enabled": {
+    "type": "bool",
+    "description": "启用独立生图",
+    "default": true
+  },
+  "provider_mode": {
+    "type": "string",
+    "description": "生图供应商来源",
+    "default": "astrbot",
+    "options": [
+      "astrbot",
+      "manual"
+    ],
+    "labels": [
+      "AstrBot 已配置 Provider",
+      "插件手动供应商"
+    ],
+    "hint": "AstrBot v4.29.3 没有统一的原生生图 Provider API；AstrBot 模式会复用选定 Provider 的地址、密钥和模型，并按明确的 Images/Responses 协议请求。"
+  },
+  "astrbot_provider_id": {
+    "type": "string",
+    "description": "AstrBot 生图 Provider",
+    "default": "",
+    "_special": "select_provider",
+    "hint": "请选择已配置的 OpenAI Images 或 OpenAI Responses 兼容 Provider。留空时使用第一个聊天 Provider。"
+  },
+  "astrbot_model_id": {
+    "type": "string",
+    "description": "AstrBot 生图模型 ID",
+    "default": "",
+    "hint": "建议填写供应商明确支持生图的模型 ID；留空使用 Provider 当前模型。"
+  },
+  "manual_provider_id": {
+    "type": "string",
+    "description": "手动供应商 ID",
+    "default": "",
+    "hint": "留空使用第一个启用的手动供应商。"
+  },
+  "manual_providers": {
+    "type": "template_list",
+    "description": "手动生图供应商",
+    "default": [],
+    "templates": {
+      "openai_images": {
+        "name": "OpenAI Images 兼容",
+        "display_item": "id",
+        "items": {
+          "id": {
+            "type": "string",
+            "description": "供应商 ID",
+            "default": ""
+          },
+          "name": {
+            "type": "string",
+            "description": "显示名称",
+            "default": "OpenAI Images"
+          },
+          "base_url": {
+            "type": "string",
+            "description": "Base URL",
+            "default": "https://api.openai.com/v1"
+          },
+          "api_key": {
+            "type": "string",
+            "description": "API Key",
+            "default": "",
+            "secret": true
+          },
+          "model": {
+            "type": "string",
+            "description": "默认模型 ID",
+            "default": ""
+          },
+          "models": {
+            "type": "list",
+            "description": "手动模型 ID",
+            "default": []
+          },
+          "models_endpoint": {
+            "type": "string",
+            "description": "模型列表接口",
+            "default": ""
+          },
+          "enabled": {
+            "type": "bool",
+            "description": "启用供应商",
+            "default": true
+          },
+          "allow_insecure_http": {
+            "type": "bool",
+            "description": "允许 HTTP",
+            "default": false
+          }
+        }
+      },
+      "openai_responses": {
+        "name": "OpenAI Responses 兼容",
+        "display_item": "id",
+        "items": {
+          "id": {
+            "type": "string",
+            "description": "供应商 ID",
+            "default": ""
+          },
+          "name": {
+            "type": "string",
+            "description": "显示名称",
+            "default": "OpenAI Responses"
+          },
+          "base_url": {
+            "type": "string",
+            "description": "Base URL",
+            "default": "https://api.openai.com/v1"
+          },
+          "api_key": {
+            "type": "string",
+            "description": "API Key",
+            "default": "",
+            "secret": true
+          },
+          "model": {
+            "type": "string",
+            "description": "默认模型 ID",
+            "default": ""
+          },
+          "models": {
+            "type": "list",
+            "description": "手动模型 ID",
+            "default": []
+          },
+          "models_endpoint": {
+            "type": "string",
+            "description": "模型列表接口",
+            "default": ""
+          },
+          "enabled": {
+            "type": "bool",
+            "description": "启用供应商",
+            "default": true
+          },
+          "allow_insecure_http": {
+            "type": "bool",
+            "description": "允许 HTTP",
+            "default": false
+          }
+        }
+      }
+    }
+  },
+  "cooldown_seconds": {
+    "type": "int",
+    "description": "单用户冷却时间（秒）",
+    "default": 60,
+    "slider": {
+      "min": 0,
+      "max": 3600,
+      "step": 1
+    }
+  },
+  "max_concurrency": {
+    "type": "int",
+    "description": "全局并发生成上限",
+    "default": 2,
+    "slider": {
+      "min": 1,
+      "max": 8,
+      "step": 1
+    }
+  },
+  "request_timeout": {
+    "type": "int",
+    "description": "请求超时时间（秒）",
+    "default": 120,
+    "slider": {
+      "min": 5,
+      "max": 600,
+      "step": 5
+    }
+  },
+  "max_prompt_chars": {
+    "type": "int",
+    "description": "提示词最大长度",
+    "default": 1000,
+    "slider": {
+      "min": 1,
+      "max": 4000,
+      "step": 50
+    }
+  },
+  "allowed_groups": {
+    "type": "list",
+    "description": "允许使用的群范围",
+    "default": [],
+    "hint": "空列表表示不限制群；可填写群 ID、平台 ID|群 ID 或平台 ID|机器人 ID|群 ID。"
+  }
+}

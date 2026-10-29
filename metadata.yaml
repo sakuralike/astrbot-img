@@ -1,0 +1,10 @@
+name: astrbot_img
+display_name: AstrBot 独立生图
+desc: 使用 AstrBot Provider 或手动配置的 OpenAI Images/Responses 供应商生成图片。
+version: 0.1.0
+author: sakuralike
+repo: https://github.com/sakuralike/astrbot-img
+support_platforms:
+  - aiocqhttp
+  - qq_official
+astrbot_version: ">=4.29.3,<5"
