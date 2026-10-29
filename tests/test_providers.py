@@ -74,6 +74,37 @@ def test_manual_template_provider_uses_first_model():
     assert settings.base_url == "https://example.com/v1"
 
 
+def test_manual_provider_can_validate_without_model_for_model_fetch():
+    settings = providers.settings_from_manual(
+        {
+            "id": "demo",
+            "protocol": "openai_images",
+            "base_url": "https://example.com/v1",
+            "api_key": "secret",
+        },
+        timeout=30,
+        require_model=False,
+    )
+    assert settings.model == ""
+
+
+def test_cached_manual_models_fill_missing_model():
+    settings = providers.manual_provider_settings(
+        [
+            {
+                "id": "demo",
+                "protocol": "openai_images",
+                "base_url": "https://example.com/v1",
+                "api_key": "secret",
+            }
+        ],
+        "",
+        30,
+        {"demo": ["image-model"]},
+    )
+    assert settings.model == "image-model"
+
+
 def test_astrbot_provider_reads_merged_connection_info():
     class Provider:
         provider_config: ClassVar[dict[str, object]] = {
@@ -211,6 +242,10 @@ async def _with_test_server(callback):
     async def invalid_json(request):
         return web.Response(text="not-json")
 
+    async def models(request):
+        assert request.headers["Authorization"] == "Bearer secret"
+        return web.json_response({"data": [{"id": "image-model"}]})
+
     async def delayed_response(request):
         await asyncio.sleep(0.2)
         return web.json_response({"data": []})
@@ -219,6 +254,7 @@ async def _with_test_server(callback):
     app.router.add_post("/responses", responses_generation)
     app.router.add_get("/status/{status}", status_response)
     app.router.add_get("/invalid-json", invalid_json)
+    app.router.add_get("/models", models)
     app.router.add_get("/delayed", delayed_response)
 
     runner = web.AppRunner(app)
@@ -260,6 +296,28 @@ def test_openai_images_base64_request_and_responses_data_url():
                 )
                 assert image_bytes == b"response-image"
                 assert image_url == ""
+
+        await _with_test_server(check)
+
+    _run(run())
+
+
+def test_fetch_model_ids_uses_base_url_and_api_key():
+    async def run():
+        async def check(base_url):
+            settings = providers.ProviderSettings(
+                provider_id="demo",
+                protocol="openai_images",
+                base_url=base_url,
+                api_key="secret",
+                model="",
+                timeout=5,
+                allow_insecure_http=True,
+            )
+            async with aiohttp.ClientSession() as session:
+                assert await providers.fetch_model_ids(
+                    session, settings, f"{base_url}/models"
+                ) == ["image-model"]
 
         await _with_test_server(check)
 

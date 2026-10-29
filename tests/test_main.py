@@ -18,5 +18,7 @@ extract_prompt = namespace["extract_prompt"]
 def test_extract_prompt():
     assert extract_prompt("/生图 一只猫") == "一只猫"
     assert extract_prompt("/生图 一只会戴帽子的猫") == "一只会戴帽子的猫"
+    assert extract_prompt("/画图 一只会飞的猫", "画图") == "一只会飞的猫"
+    assert extract_prompt("/生图 一只会飞的猫", "画图") == "一只会飞的猫"
     assert extract_prompt("一只猫") == "一只猫"
     assert extract_prompt("/生图") == ""

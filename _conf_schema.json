@@ -31,6 +31,18 @@
     "default": "",
     "hint": "建议填写供应商明确支持生图的模型 ID；留空使用 Provider 当前模型。"
   },
+  "generate_command": {
+    "type": "string",
+    "description": "生图命令",
+    "default": "生图",
+    "hint": "可填写不带斜杠的单个命令词；修改后同时保留 /生图 兼容。"
+  },
+  "models_command": {
+    "type": "string",
+    "description": "获取模型命令",
+    "default": "获取生图模型",
+    "hint": "管理员在群内使用此命令从手动供应商的 /models 接口获取模型列表。"
+  },
   "manual_provider_id": {
     "type": "string",
     "description": "手动供应商 ID",

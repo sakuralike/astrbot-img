@@ -215,7 +215,12 @@ def settings_from_astrbot_provider(
     )
 
 
-def settings_from_manual(raw: Mapping[str, Any], timeout: int) -> ProviderSettings:
+def settings_from_manual(
+    raw: Mapping[str, Any],
+    timeout: int,
+    *,
+    require_model: bool = True,
+) -> ProviderSettings:
     provider_id = _text(raw.get("id"))
     if not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", provider_id):
         raise ImageProviderError("invalid_config", "手动供应商 ID 无效。")
@@ -242,7 +247,7 @@ def settings_from_manual(raw: Mapping[str, Any], timeout: int) -> ProviderSettin
             ),
             "",
         )
-    if not api_key or not model:
+    if not api_key or (require_model and not model):
         raise ImageProviderError("invalid_config", "手动供应商缺少 API Key 或模型 ID。")
     return ProviderSettings(
         provider_id=provider_id,
@@ -259,6 +264,7 @@ def manual_provider_settings(
     providers: Any,
     selected_id: str,
     timeout: int,
+    model_cache: Mapping[str, list[str]] | None = None,
 ) -> ProviderSettings:
     if not isinstance(providers, list):
         raise ImageProviderError("not_configured", "未配置手动生图供应商。")
@@ -282,7 +288,17 @@ def manual_provider_settings(
     last_error: ImageProviderError | None = None
     for item in candidates:
         try:
-            return settings_from_manual(item, timeout)
+            raw = item
+            provider_id = _text(item.get("id"))
+            cached_models = (
+                model_cache.get(provider_id, [])
+                if isinstance(model_cache, Mapping)
+                else []
+            )
+            if cached_models and not _text(item.get("model")):
+                raw = dict(item)
+                raw["models"] = cached_models
+            return settings_from_manual(raw, timeout)
         except ImageProviderError as error:
             last_error = error
             if selected:

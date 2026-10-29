@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import inspect
 import time
 from collections.abc import Mapping
 from pathlib import Path
@@ -31,6 +32,8 @@ DEFAULT_TIMEOUT = 120
 DEFAULT_COOLDOWN = 60
 DEFAULT_CONCURRENCY = 2
 DEFAULT_MAX_PROMPT_CHARS = 1000
+DEFAULT_GENERATE_COMMAND = "生图"
+DEFAULT_MODELS_COMMAND = "获取生图模型"
 MAX_IMAGE_BYTES = 25 * 1024 * 1024
 
 
@@ -42,10 +45,26 @@ def _bounded_int(value: Any, default: int, minimum: int, maximum: int) -> int:
     return min(maximum, max(minimum, value))
 
 
-def extract_prompt(message: str) -> str:
+def _command_name(value: Any, default: str) -> str:
+    if not isinstance(value, str):
+        return default
+    command = value.strip().lstrip("/").strip()
+    if not command or any(char.isspace() for char in command):
+        return default
+    return command
+
+
+def extract_prompt(message: str, command: str = "生图") -> str:
     text = str(message or "").strip()
-    if text.startswith("/生图"):
-        return text[3:].strip()
+    command = command.strip().lstrip("/").strip() if isinstance(command, str) else ""
+    if not command or any(char.isspace() for char in command):
+        command = "生图"
+    prefixes = {"/生图", f"/{command}"}
+    for prefix in sorted(prefixes, key=len, reverse=True):
+        if text == prefix:
+            return ""
+        if text.startswith(f"{prefix} "):
+            return text[len(prefix) :].strip()
     return text
 
 
@@ -84,6 +103,47 @@ class ImageGenerationPlugin(Star):
         )
         self._temp_dir.mkdir(parents=True, exist_ok=True)
         self._terminated = False
+        self.generate_command = _command_name(
+            config.get("generate_command", DEFAULT_GENERATE_COMMAND),
+            DEFAULT_GENERATE_COMMAND,
+        )
+        self.models_command = _command_name(
+            config.get("models_command", DEFAULT_MODELS_COMMAND),
+            DEFAULT_MODELS_COMMAND,
+        )
+        self._model_cache: dict[str, list[str]] = {}
+        self._configure_commands()
+
+    def _configure_commands(self) -> None:
+        try:
+            from astrbot.core.star.star_handler import star_handlers_registry
+        except (ImportError, AttributeError):
+            return
+
+        command_names = {
+            "generate": (self.generate_command, DEFAULT_GENERATE_COMMAND),
+            "refresh_models": (self.models_command, DEFAULT_MODELS_COMMAND),
+        }
+        for handler_name, (command_name, default_name) in command_names.items():
+            handler = star_handlers_registry.get_handler_by_full_name(
+                f"{__name__}_{handler_name}"
+            )
+            if handler is None:
+                continue
+            for filter_ref in handler.event_filters:
+                if not hasattr(filter_ref, "command_name"):
+                    continue
+                base_aliases = getattr(filter_ref, "_astrbot_img_base_aliases", None)
+                if base_aliases is None:
+                    base_aliases = set(getattr(filter_ref, "alias", set()))
+                    filter_ref._astrbot_img_base_aliases = set(base_aliases)
+                aliases = set(base_aliases)
+                if command_name != default_name:
+                    aliases.add(default_name)
+                filter_ref.command_name = command_name
+                filter_ref.alias = aliases
+                filter_ref._cmpl_cmd_names = None
+                break
 
     async def _http(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
@@ -176,10 +236,81 @@ class ImageGenerationPlugin(Star):
                 self.config.get("manual_providers", []),
                 str(self.config.get("manual_provider_id", "") or ""),
                 timeout,
+                self._model_cache,
             )
         if mode != "astrbot":
             raise ImageProviderError("invalid_config", "生图供应商模式无效。")
         return self._framework_settings()
+
+    def _manual_provider_items(self) -> list[Mapping[str, Any]]:
+        providers = self.config.get("manual_providers", [])
+        if not isinstance(providers, list):
+            return []
+        return [
+            item
+            for item in providers
+            if isinstance(item, Mapping)
+            and item.get("enabled", True) is not False
+            and str(item.get("id", "") or "").strip()
+        ]
+
+    def _manual_model_endpoints(self, item: Mapping[str, Any]) -> list[str]:
+        configured = str(item.get("models_endpoint", "") or "").strip()
+        if configured:
+            return [configured]
+        base_url = str(item.get("base_url", "") or "").rstrip("/")
+        if not base_url:
+            return []
+        endpoints = [f"{base_url}/models"]
+        if not base_url.lower().endswith("/v1"):
+            endpoints.append(f"{base_url}/v1/models")
+        return endpoints
+
+    async def _fetch_manual_models(self, item: Mapping[str, Any]) -> list[str]:
+        timeout = _bounded_int(
+            self.config.get("request_timeout", DEFAULT_TIMEOUT),
+            DEFAULT_TIMEOUT,
+            5,
+            600,
+        )
+        settings = settings_from_manual(item, timeout, require_model=False)
+        session = await self._http()
+        last_error: ImageProviderError | None = None
+        for endpoint in self._manual_model_endpoints(item):
+            try:
+                models = await fetch_model_ids(session, settings, endpoint)
+                if models:
+                    return models
+                last_error = ImageProviderError(
+                    "invalid_response", "供应商没有返回可用模型。"
+                )
+            except ImageProviderError as error:
+                last_error = error
+        raise last_error or ImageProviderError(
+            "invalid_config", "未配置模型列表接口。"
+        )
+
+    def _cache_manual_models(self, provider_id: str, models: list[str]) -> None:
+        self._model_cache[provider_id] = list(dict.fromkeys(models))
+
+    async def _persist_manual_models(
+        self, provider_id: str, models: list[str]
+    ) -> None:
+        providers = self.config.get("manual_providers", [])
+        if isinstance(providers, list):
+            for item in providers:
+                if (
+                    isinstance(item, dict)
+                    and str(item.get("id", "") or "").strip() == provider_id
+                ):
+                    item["models"] = list(dict.fromkeys(models))
+                    break
+        save_config = getattr(self.config, "save_config", None)
+        if not callable(save_config):
+            return
+        result = save_config()
+        if inspect.isawaitable(result):
+            await result
 
     async def _download_image(self, url: str, settings: ProviderSettings) -> bytes:
         parsed = urlparse(url)
@@ -238,7 +369,7 @@ class ImageGenerationPlugin(Star):
             return
         event.should_call_llm(False)
         event.stop_event()
-        prompt = extract_prompt(event.get_message_str())
+        prompt = extract_prompt(event.get_message_str(), self.generate_command)
         max_chars = _bounded_int(
             self.config.get("max_prompt_chars", DEFAULT_MAX_PROMPT_CHARS),
             DEFAULT_MAX_PROMPT_CHARS,
@@ -246,7 +377,9 @@ class ImageGenerationPlugin(Star):
             4000,
         )
         if not prompt:
-            await self._send_text(event, "用法：/生图 你的提示词")
+            await self._send_text(
+                event, f"用法：/{self.generate_command} 你的提示词"
+            )
             return
         if len(prompt) > max_chars:
             await self._send_text(event, f"提示词过长，请控制在 {max_chars} 字以内。")
@@ -287,6 +420,44 @@ class ImageGenerationPlugin(Star):
                 if not request_succeeded:
                     self._clear_cooldown(event)
 
+    def _is_admin(self, event: AstrMessageEvent) -> bool:
+        try:
+            return event.is_admin() is True
+        except (AttributeError, TypeError, ValueError):
+            return False
+
+    @filter.command(DEFAULT_MODELS_COMMAND)
+    @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)
+    async def refresh_models(self, event: AstrMessageEvent) -> None:
+        if (
+            self._terminated
+            or self.config.get("enabled", True) is not True
+            or not self._scope_allowed(event)
+        ):
+            return
+        event.should_call_llm(False)
+        event.stop_event()
+        if not self._is_admin(event):
+            await self._send_text(event, "只有管理员可以获取生图模型。")
+            return
+        if str(self.config.get("provider_mode", "astrbot") or "") != "manual":
+            await self._send_text(event, "请先将生图供应商来源设置为插件手动供应商。")
+            return
+        results: list[str] = []
+        for item in self._manual_provider_items():
+            provider_id = str(item.get("id", "") or "").strip()
+            try:
+                models = await self._fetch_manual_models(item)
+                self._cache_manual_models(provider_id, models)
+                await self._persist_manual_models(provider_id, models)
+                results.append(f"{provider_id}：{', '.join(models)}")
+            except ImageProviderError as error:
+                results.append(f"{provider_id}：获取失败（{_display_error(error)}）")
+        if results:
+            await self._send_text(event, "生图模型列表：\n" + "\n".join(results))
+        else:
+            await self._send_text(event, "未找到启用的手动生图供应商。")
+
     @filter.on_decorating_result()
     async def qq_official_plain_reply(self, event: AstrMessageEvent) -> None:
         if self._terminated or event.get_platform_name() != "qq_official":
@@ -305,25 +476,14 @@ class ImageGenerationPlugin(Star):
             != "manual"
         ):
             return
-        session = await self._http()
-        for item in self.config.get("manual_providers", []):
-            if not isinstance(item, Mapping) or item.get("enabled", True) is False:
-                continue
-            endpoint = str(item.get("models_endpoint", "") or "").strip()
-            if not endpoint:
-                base_url = str(item.get("base_url", "") or "").rstrip("/")
-                endpoint = f"{base_url}/models"
+        for item in self._manual_provider_items():
             try:
-                settings = settings_from_manual(item, _bounded_int(
-                    self.config.get("request_timeout", DEFAULT_TIMEOUT),
-                    DEFAULT_TIMEOUT,
-                    5,
-                    600,
-                ))
-                models = await fetch_model_ids(session, settings, endpoint)
+                models = await self._fetch_manual_models(item)
+                provider_id = str(item.get("id", "") or "").strip()
+                self._cache_manual_models(provider_id, models)
                 logger.info(
                     "AstrBot 生图供应商 %s 可用模型数：%d",
-                    settings.provider_id,
+                    provider_id,
                     len(models),
                 )
             except (ImageProviderError, aiohttp.ClientError, OSError, ValueError):
