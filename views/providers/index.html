@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>生图供应商</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <main class="workspace">
+      <aside class="provider-rail">
+        <div class="rail-heading">
+          <div>
+            <p class="eyebrow">IMAGE GENERATION</p>
+            <h1>供应商</h1>
+          </div>
+          <button class="icon-button" id="new-provider" type="button" title="新增供应商" aria-label="新增供应商">+</button>
+        </div>
+        <div id="provider-list" class="provider-list" aria-live="polite"></div>
+        <div class="rail-footer">
+          <span class="status-dot"></span>
+          <span id="source-status">读取配置中</span>
+        </div>
+      </aside>
+
+      <section class="editor">
+        <header class="editor-header">
+          <div>
+            <p class="eyebrow">MANUAL PROVIDER</p>
+            <h2 id="form-heading">新增供应商</h2>
+          </div>
+          <button class="text-button danger" id="delete-provider" type="button" hidden>删除供应商</button>
+        </header>
+
+        <form id="provider-form">
+          <input id="original-id" type="hidden" value="" />
+          <div class="form-grid">
+            <label>
+              <span>显示名称</span>
+              <input id="name" name="name" maxlength="128" required placeholder="例如：我的生图服务" />
+            </label>
+            <label>
+              <span>供应商 ID</span>
+              <input id="provider-id" name="id" maxlength="64" pattern="[A-Za-z0-9_.-]+" required placeholder="例如：my-image-api" />
+            </label>
+            <label>
+              <span>接口协议</span>
+              <select id="protocol" name="protocol">
+                <option value="openai_images">OpenAI Images</option>
+                <option value="openai_responses">OpenAI Responses</option>
+              </select>
+            </label>
+            <label class="wide">
+              <span>API Base URL</span>
+              <input id="base-url" name="base_url" type="url" maxlength="2048" required placeholder="https://api.example.com/v1" />
+            </label>
+            <label class="wide">
+              <span class="label-row">
+                <span>API Key</span>
+                <small id="key-status">尚未配置</small>
+              </span>
+              <input id="api-key" name="api_key" type="password" autocomplete="new-password" maxlength="8192" placeholder="输入供应商 API Key" />
+            </label>
+          </div>
+
+          <details class="advanced">
+            <summary>高级配置</summary>
+            <div class="advanced-grid">
+              <label class="wide">
+                <span>模型列表接口（可选）</span>
+                <input id="models-endpoint" name="models_endpoint" type="url" maxlength="2048" placeholder="留空时自动尝试 /models 与 /v1/models" />
+              </label>
+              <label class="toggle-row">
+                <input id="enabled" type="checkbox" checked />
+                <span>启用此供应商</span>
+              </label>
+              <label class="toggle-row">
+                <input id="allow-http" type="checkbox" />
+                <span>允许 HTTP（不安全）</span>
+              </label>
+            </div>
+          </details>
+
+          <section class="model-section" aria-labelledby="model-heading">
+            <div class="section-heading">
+              <div>
+                <p class="eyebrow">MODEL CATALOG</p>
+                <h3 id="model-heading">选择生图模型</h3>
+              </div>
+              <button class="text-button" id="fetch-models" type="button">保存并获取模型</button>
+            </div>
+            <label class="search-field">
+              <span class="sr-only">搜索模型</span>
+              <input id="model-search" type="search" placeholder="搜索已获取的模型" />
+              <span class="search-icon" aria-hidden="true"></span>
+            </label>
+            <div id="model-list" class="model-list">
+              <p class="empty-state">保存供应商后获取模型，或直接填写自定义模型 ID。</p>
+            </div>
+            <label class="custom-model">
+              <span>生图模型 ID</span>
+              <input id="model" name="model" maxlength="256" placeholder="从列表选择，或输入自定义模型 ID" />
+            </label>
+          </section>
+
+          <label class="current-toggle">
+            <input id="set-current" type="checkbox" />
+            <span>
+              <strong>设为当前生图供应商</strong>
+              <small>勾选后，生图指令将使用此供应商及当前模型。</small>
+            </span>
+          </label>
+
+          <footer class="form-footer">
+            <p id="feedback" role="status" aria-live="polite"></p>
+            <div class="form-actions">
+              <button class="primary-button" id="save-provider" type="submit">保存配置</button>
+            </div>
+          </footer>
+        </form>
+      </section>
+    </main>
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

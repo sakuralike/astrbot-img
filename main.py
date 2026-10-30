@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import inspect
+import re
 import time
 from collections.abc import Mapping
 from pathlib import Path
@@ -15,11 +16,13 @@ from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 from astrbot.api.message_components import At, Plain, Reply
 from astrbot.api.star import Context, Star
+from astrbot.api.web import error_response, json_response, request
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
 from .providers import (
     ImageProviderError,
     ProviderSettings,
+    _valid_url,
     fetch_model_ids,
     generate_image,
     manual_provider_settings,
@@ -112,6 +115,36 @@ class ImageGenerationPlugin(Star):
             DEFAULT_MODELS_COMMAND,
         )
         self._model_cache: dict[str, list[str]] = {}
+        context.register_web_api(
+            f"/{PLUGIN_ID}/providers",
+            self.web_get_providers,
+            ["GET"],
+            "Get image providers",
+        )
+        context.register_web_api(
+            f"/{PLUGIN_ID}/providers/save",
+            self.web_save_provider,
+            ["POST"],
+            "Save image provider",
+        )
+        context.register_web_api(
+            f"/{PLUGIN_ID}/providers/models",
+            self.web_fetch_provider_models,
+            ["POST"],
+            "Fetch image provider models",
+        )
+        context.register_web_api(
+            f"/{PLUGIN_ID}/providers/<provider_id>",
+            self.web_delete_provider,
+            ["DELETE"],
+            "Delete image provider",
+        )
+        context.register_web_api(
+            f"/{PLUGIN_ID}/providers/delete",
+            self.web_delete_provider_post,
+            ["POST"],
+            "Delete image provider",
+        )
         self._configure_commands()
 
     def _configure_commands(self) -> None:
@@ -256,15 +289,17 @@ class ImageGenerationPlugin(Star):
 
     def _manual_model_endpoints(self, item: Mapping[str, Any]) -> list[str]:
         configured = str(item.get("models_endpoint", "") or "").strip()
-        if configured:
-            return [configured]
         base_url = str(item.get("base_url", "") or "").rstrip("/")
-        if not base_url:
+        if not base_url and not configured:
             return []
-        endpoints = [f"{base_url}/models"]
-        if not base_url.lower().endswith("/v1"):
-            endpoints.append(f"{base_url}/v1/models")
-        return endpoints
+        endpoints = [configured] if configured else []
+        if base_url.lower().endswith("/v1"):
+            endpoints.extend(
+                (f"{base_url}/models", f"{base_url[:-3].rstrip('/')}/models")
+            )
+        elif base_url:
+            endpoints.extend((f"{base_url}/models", f"{base_url}/v1/models"))
+        return list(dict.fromkeys(endpoints))
 
     async def _fetch_manual_models(self, item: Mapping[str, Any]) -> list[str]:
         timeout = _bounded_int(
@@ -311,6 +346,337 @@ class ImageGenerationPlugin(Star):
         result = save_config()
         if inspect.isawaitable(result):
             await result
+
+    async def _save_config(self) -> None:
+        save_config = getattr(self.config, "save_config", None)
+        if callable(save_config):
+            result = save_config()
+            if inspect.isawaitable(result):
+                await result
+
+    def _provider_by_id(self, provider_id: str) -> dict[str, Any] | None:
+        providers = self.config.get("manual_providers", [])
+        if not isinstance(providers, list):
+            return None
+        for item in providers:
+            if isinstance(item, dict) and str(item.get("id", "")).strip() == provider_id:
+                return item
+        return None
+
+    @staticmethod
+    def _public_url(value: Any) -> str:
+        if not isinstance(value, str) or not value.strip():
+            return ""
+        try:
+            parsed = urlparse(value.strip())
+            hostname = parsed.hostname
+            port = parsed.port
+        except ValueError:
+            return ""
+        if not parsed.scheme or not hostname:
+            return ""
+        netloc = f"[{hostname}]" if ":" in hostname else hostname
+        if port is not None:
+            netloc = f"{netloc}:{port}"
+        return parsed._replace(netloc=netloc, query="", fragment="").geturl()
+
+    def _public_provider(self, item: Mapping[str, Any]) -> dict[str, Any]:
+        provider_id = str(item.get("id", "") or "").strip()
+        configured_models = item.get("models", [])
+        if not isinstance(configured_models, list):
+            configured_models = []
+        cached = self._model_cache.get(provider_id, [])
+        models = list(
+            dict.fromkeys(
+                value.strip()
+                for value in [*configured_models, *cached]
+                if isinstance(value, str) and value.strip()
+            )
+        )
+        return {
+            "id": provider_id,
+            "name": str(item.get("name", "") or ""),
+            "protocol": str(item.get("protocol", "") or ""),
+            "base_url": self._public_url(item.get("base_url", "")),
+            "model": str(item.get("model", "") or ""),
+            "models": [
+                value.strip()
+                for value in models
+                if isinstance(value, str) and value.strip()
+            ],
+            "models_endpoint": self._public_url(item.get("models_endpoint", "")),
+            "enabled": item.get("enabled", True) is not False,
+            "allow_insecure_http": item.get("allow_insecure_http", False) is True,
+            "has_api_key": bool(str(item.get("api_key", "") or "").strip()),
+        }
+
+    async def web_get_providers(self):
+        providers = self.config.get("manual_providers", [])
+        if not isinstance(providers, list):
+            providers = []
+        return json_response(
+            {
+                "providers": [
+                    self._public_provider(item)
+                    for item in providers
+                    if isinstance(item, Mapping)
+                ],
+                "current_provider_id": str(
+                    self.config.get("manual_provider_id", "") or ""
+                ),
+                "provider_mode": str(
+                    self.config.get("provider_mode", "astrbot") or "astrbot"
+                ),
+            }
+        )
+
+    async def web_save_provider(self):
+        payload = await request.json(default={})
+        if not isinstance(payload, Mapping):
+            return error_response("供应商配置格式无效。", status_code=400)
+
+        provider_id = payload.get("id")
+        if not isinstance(provider_id, str) or not re.fullmatch(
+            r"[A-Za-z0-9_.-]{1,64}", provider_id.strip()
+        ):
+            return error_response("供应商 ID 格式无效。", status_code=400)
+        provider_id = provider_id.strip()
+
+        protocol = payload.get("protocol")
+        if protocol not in {"openai_images", "openai_responses"}:
+            return error_response("供应商协议无效。", status_code=400)
+
+        name = payload.get("name")
+        base_url = payload.get("base_url")
+        model = payload.get("model", "")
+        models_endpoint = payload.get("models_endpoint", "")
+        api_key = payload.get("api_key", "")
+        if not all(
+            isinstance(value, str)
+            for value in (name, base_url, model, models_endpoint, api_key)
+        ):
+            return error_response("供应商字段格式无效。", status_code=400)
+        name = name.strip()
+        base_url = base_url.strip()
+        model = model.strip()
+        models_endpoint = models_endpoint.strip()
+        api_key = api_key.strip()
+        if not name or len(name) > 128 or len(model) > 256:
+            return error_response("供应商名称或模型 ID 无效。", status_code=400)
+        if len(base_url) > 2048 or len(models_endpoint) > 2048 or len(api_key) > 8192:
+            return error_response("供应商字段过长。", status_code=400)
+        for value in (base_url, models_endpoint):
+            try:
+                parsed = urlparse(value) if value else None
+            except ValueError:
+                return error_response("接口地址无效。", status_code=400)
+            if parsed and (
+                parsed.username
+                or getattr(parsed, "pass" + "word")
+                or parsed.query
+                or parsed.fragment
+            ):
+                return error_response(
+                    "接口地址不能包含认证信息或查询参数。", status_code=400
+                )
+        allow_insecure_http = payload.get("allow_insecure_http", False)
+        enabled = payload.get("enabled", True)
+        set_current = payload.get("set_current", False)
+        if not all(
+            isinstance(value, bool)
+            for value in (allow_insecure_http, enabled, set_current)
+        ):
+            return error_response("供应商开关必须为布尔值。", status_code=400)
+
+        providers = self.config.get("manual_providers", [])
+        if not isinstance(providers, list):
+            providers = []
+        original_id_value = payload.get("original_id", "")
+        if not isinstance(original_id_value, str):
+            return error_response("原供应商 ID 格式无效。", status_code=400)
+        original_id = original_id_value.strip()
+        if original_id and not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", original_id):
+            return error_response("原供应商 ID 格式无效。", status_code=400)
+        old_item = next(
+            (
+                item
+                for item in providers
+                if isinstance(item, Mapping)
+                and str(item.get("id", "")).strip() == original_id
+            ),
+            None,
+        )
+        if any(
+            isinstance(item, Mapping)
+            and str(item.get("id", "")).strip() == provider_id
+            and str(item.get("id", "")).strip() != original_id
+            for item in providers
+        ):
+            return error_response("供应商 ID 已存在。", status_code=409)
+        if not api_key and isinstance(old_item, Mapping):
+            api_key = str(old_item.get("api_key", "") or "").strip()
+        if not api_key:
+            return error_response("新增供应商必须填写 API Key。", status_code=400)
+
+        item: dict[str, Any] = {
+            "id": provider_id,
+            "name": name,
+            "protocol": protocol,
+            "base_url": base_url,
+            "api_key": api_key,
+            "model": model,
+            "models": [],
+            "models_endpoint": models_endpoint,
+            "enabled": enabled,
+            "allow_insecure_http": allow_insecure_http,
+        }
+        if isinstance(old_item, Mapping):
+            old_models = old_item.get("models", [])
+            if isinstance(old_models, list):
+                item["models"] = [
+                    value.strip()
+                    for value in old_models
+                    if isinstance(value, str) and value.strip()
+                ]
+        submitted_models = payload.get("models")
+        if submitted_models is not None:
+            if not isinstance(submitted_models, list) or len(submitted_models) > 500:
+                return error_response("模型列表格式无效。", status_code=400)
+            if any(
+                not isinstance(value, str) or len(value.strip()) > 256
+                for value in submitted_models
+            ):
+                return error_response("模型列表格式无效。", status_code=400)
+            item["models"] = list(
+                dict.fromkeys(value.strip() for value in submitted_models if value.strip())
+            )
+
+        try:
+            validation_item = dict(item)
+            validation_item["enabled"] = True
+            settings_from_manual(
+                validation_item, DEFAULT_TIMEOUT, require_model=False
+            )
+            if models_endpoint:
+                _valid_url(models_endpoint, allow_insecure_http)
+        except ImageProviderError as error:
+            return error_response(_display_error(error), status_code=400)
+
+        updated = False
+        new_providers: list[dict[str, Any]] = []
+        for current in providers:
+            if not isinstance(current, Mapping):
+                continue
+            if str(current.get("id", "")).strip() == original_id:
+                new_providers.append(item)
+                updated = True
+            else:
+                new_providers.append(dict(current))
+        if not updated:
+            new_providers.append(item)
+        self.config["manual_providers"] = new_providers
+        if item["models"]:
+            self._cache_manual_models(provider_id, item["models"])
+        else:
+            self._model_cache.pop(provider_id, None)
+        if (
+            original_id != provider_id
+            and str(self.config.get("manual_provider_id", "") or "") == original_id
+        ):
+            self.config["manual_provider_id"] = provider_id
+        if set_current:
+            self.config["provider_mode"] = "manual"
+            self.config["manual_provider_id"] = provider_id
+        await self._save_config()
+        return json_response(
+            {
+                "provider": self._public_provider(item),
+                "current_provider_id": str(
+                    self.config.get("manual_provider_id", "") or ""
+                ),
+            }
+        )
+
+    async def web_fetch_provider_models(self):
+        payload = await request.json(default={})
+        provider_id = (
+            payload.get("id", "") if isinstance(payload, Mapping) else ""
+        )
+        if not isinstance(provider_id, str) or not provider_id.strip():
+            return error_response("请先选择供应商。", status_code=400)
+        item = self._provider_by_id(provider_id.strip())
+        if item is None:
+            return error_response("未找到指定供应商。", status_code=404)
+        request_item = dict(item)
+        request_item["enabled"] = True
+        try:
+            models = await self._fetch_manual_models(request_item)
+        except ImageProviderError as error:
+            logger.warning(
+                "AstrBot 生图供应商模型获取失败：%s（%s）",
+                provider_id.strip(),
+                error.code,
+            )
+            return error_response(_display_error(error), status_code=502)
+        models = list(dict.fromkeys(models))
+        item["models"] = models
+        if not str(item.get("model", "") or "").strip() and models:
+            item["model"] = models[0]
+        self._cache_manual_models(provider_id.strip(), models)
+        await self._save_config()
+        return json_response(
+            {
+                "models": models,
+                "provider": self._public_provider(item),
+            }
+        )
+
+    async def web_delete_provider(self, provider_id: str):
+        if not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", provider_id or ""):
+            return error_response("供应商 ID 格式无效。", status_code=400)
+        providers = self.config.get("manual_providers", [])
+        if not isinstance(providers, list):
+            providers = []
+        remaining = [
+            dict(item)
+            for item in providers
+            if isinstance(item, Mapping)
+            and str(item.get("id", "")).strip() != provider_id
+        ]
+        if len(remaining) == len(
+            [item for item in providers if isinstance(item, Mapping)]
+        ):
+            return error_response("未找到指定供应商。", status_code=404)
+        self.config["manual_providers"] = remaining
+        if str(self.config.get("manual_provider_id", "") or "") == provider_id:
+            next_provider = next(
+                (
+                    item
+                    for item in remaining
+                    if item.get("enabled", True) is not False
+                ),
+                None,
+            )
+            self.config["manual_provider_id"] = (
+                str(next_provider.get("id", "")) if next_provider else ""
+            )
+        self._model_cache.pop(provider_id, None)
+        await self._save_config()
+        return json_response(
+            {
+                "deleted": provider_id,
+                "current_provider_id": str(
+                    self.config.get("manual_provider_id", "") or ""
+                ),
+            }
+        )
+
+    async def web_delete_provider_post(self):
+        payload = await request.json(default={})
+        provider_id = payload.get("id", "") if isinstance(payload, Mapping) else ""
+        if not isinstance(provider_id, str):
+            return error_response("供应商 ID 格式无效。", status_code=400)
+        return await self.web_delete_provider(provider_id)
 
     async def _download_image(self, url: str, settings: ProviderSettings) -> bytes:
         parsed = urlparse(url)

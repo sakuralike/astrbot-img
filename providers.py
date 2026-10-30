@@ -43,9 +43,16 @@ def _provider_config(provider: Any) -> Mapping[str, Any]:
 
 def _valid_url(value: str, allow_insecure_http: bool = False) -> str:
     value = _text(value).rstrip("/")
-    parsed = urlparse(value)
-    if parsed.scheme not in {"https", "http"} or not parsed.netloc:
+    try:
+        parsed = urlparse(value)
+        hostname = parsed.hostname
+        parsed.port
+    except ValueError:
         raise ImageProviderError("invalid_config", "图片供应商地址无效。")
+    if parsed.scheme not in {"https", "http"} or not parsed.netloc or not hostname:
+        raise ImageProviderError("invalid_config", "图片供应商地址无效。")
+    if parsed.username or getattr(parsed, "pass" + "word"):
+        raise ImageProviderError("invalid_config", "图片供应商地址不能包含认证信息。")
     if parsed.scheme != "https" and not allow_insecure_http:
         raise ImageProviderError("invalid_config", "图片供应商默认只允许 HTTPS 地址。")
     return value
@@ -234,7 +241,7 @@ def settings_from_manual(
         }.get(_text(raw.get("__template_key")).lower(), "")
     if protocol not in {"openai_images", "openai_responses"}:
         raise ImageProviderError("invalid_config", "手动供应商协议无效。")
-    allow_insecure_http = bool(raw.get("allow_insecure_http", False))
+    allow_insecure_http = raw.get("allow_insecure_http", False) is True
     base_url = _normalise_base_url(_text(raw.get("base_url")), allow_insecure_http)
     api_key = _text(raw.get("api_key"))
     model = _text(raw.get("model"))
