@@ -26,7 +26,6 @@ from .providers import (
     fetch_model_ids,
     generate_image,
     manual_provider_settings,
-    settings_from_astrbot_provider,
     settings_from_manual,
 )
 
@@ -73,9 +72,8 @@ def extract_prompt(message: str, command: str = "生图") -> str:
 
 def _display_error(error: ImageProviderError) -> str:
     return {
-        "not_configured": "生图功能尚未配置，请管理员选择 Provider 或配置手动供应商。",
+        "not_configured": "生图功能尚未配置，请管理员配置插件手动供应商。",
         "invalid_config": "生图配置无效，请管理员检查接口地址、密钥和模型 ID。",
-        "unsupported_provider": "所选 Provider 不支持明确的 OpenAI Images/Responses 生图协议。",
         "unauthorized": "生图供应商鉴权失败，请管理员检查密钥。",
         "rate_limited": "生图请求过于频繁，请稍后再试。",
         "timeout": "生图请求超时，请稍后再试。",
@@ -231,49 +229,19 @@ class ImageGenerationPlugin(Star):
     def _clear_cooldown(self, event: AstrMessageEvent) -> None:
         self._cooldowns.pop(self._cooldown_key(event), None)
 
-    def _framework_settings(self) -> ProviderSettings:
-        provider_id = str(self.config.get("astrbot_provider_id", "") or "").strip()
-        provider = (
-            self.context.get_provider_by_id(provider_id) if provider_id else None
-        )
-        if provider is None and not provider_id:
-            providers = self.context.get_all_providers()
-            provider = providers[0] if providers else None
-            if provider is not None:
-                try:
-                    provider_id = str(provider.meta().id or "")
-                except (AttributeError, TypeError, ValueError):
-                    provider_id = ""
-        return settings_from_astrbot_provider(
-            provider_id,
-            provider,
-            str(self.config.get("astrbot_model_id", "") or ""),
-            _bounded_int(
-                self.config.get("request_timeout", DEFAULT_TIMEOUT),
-                DEFAULT_TIMEOUT,
-                5,
-                600,
-            ),
-        )
-
     def _provider_settings(self) -> ProviderSettings:
-        mode = str(self.config.get("provider_mode", "astrbot") or "astrbot")
         timeout = _bounded_int(
             self.config.get("request_timeout", DEFAULT_TIMEOUT),
             DEFAULT_TIMEOUT,
             5,
             600,
         )
-        if mode == "manual":
-            return manual_provider_settings(
-                self.config.get("manual_providers", []),
-                str(self.config.get("manual_provider_id", "") or ""),
-                timeout,
-                self._model_cache,
-            )
-        if mode != "astrbot":
-            raise ImageProviderError("invalid_config", "生图供应商模式无效。")
-        return self._framework_settings()
+        return manual_provider_settings(
+            self.config.get("manual_providers", []),
+            str(self.config.get("manual_provider_id", "") or ""),
+            timeout,
+            self._model_cache,
+        )
 
     def _manual_provider_items(self) -> list[Mapping[str, Any]]:
         providers = self.config.get("manual_providers", [])
@@ -424,9 +392,6 @@ class ImageGenerationPlugin(Star):
                 "current_provider_id": str(
                     self.config.get("manual_provider_id", "") or ""
                 ),
-                "provider_mode": str(
-                    self.config.get("provider_mode", "astrbot") or "astrbot"
-                ),
             }
         )
 
@@ -547,9 +512,11 @@ class ImageGenerationPlugin(Star):
                 for value in submitted_models
             ):
                 return error_response("模型列表格式无效。", status_code=400)
-            item["models"] = list(
+            submitted_models = list(
                 dict.fromkeys(value.strip() for value in submitted_models if value.strip())
             )
+            if submitted_models or not item["models"]:
+                item["models"] = submitted_models
 
         try:
             validation_item = dict(item)
@@ -585,7 +552,6 @@ class ImageGenerationPlugin(Star):
         ):
             self.config["manual_provider_id"] = provider_id
         if set_current:
-            self.config["provider_mode"] = "manual"
             self.config["manual_provider_id"] = provider_id
         await self._save_config()
         return json_response(
@@ -806,9 +772,6 @@ class ImageGenerationPlugin(Star):
         if not self._is_admin(event):
             await self._send_text(event, "只有管理员可以获取生图模型。")
             return
-        if str(self.config.get("provider_mode", "astrbot") or "") != "manual":
-            await self._send_text(event, "请先将生图供应商来源设置为插件手动供应商。")
-            return
         results: list[str] = []
         for item in self._manual_provider_items():
             provider_id = str(item.get("id", "") or "").strip()
@@ -836,11 +799,7 @@ class ImageGenerationPlugin(Star):
 
     @filter.on_astrbot_loaded()
     async def on_astrbot_loaded(self) -> None:
-        if (
-            self.config.get("enabled", True) is not True
-            or str(self.config.get("provider_mode", "astrbot") or "astrbot")
-            != "manual"
-        ):
+        if self.config.get("enabled", True) is not True:
             return
         for item in self._manual_provider_items():
             try:

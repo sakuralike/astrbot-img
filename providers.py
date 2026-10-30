@@ -36,11 +36,6 @@ def _text(value: Any) -> str:
     return value.strip() if isinstance(value, str) else ""
 
 
-def _provider_config(provider: Any) -> Mapping[str, Any]:
-    config = getattr(provider, "provider_config", None)
-    return config if isinstance(config, Mapping) else {}
-
-
 def _valid_url(value: str, allow_insecure_http: bool = False) -> str:
     value = _text(value).rstrip("/")
     try:
@@ -66,24 +61,6 @@ def _join_endpoint(base_url: str, suffix: str) -> str:
     if base_url.endswith(suffix):
         return base_url
     return f"{base_url}{suffix}"
-
-
-def _first_key(provider: Any, config: Mapping[str, Any]) -> str:
-    try:
-        current = provider.get_current_key()
-    except (AttributeError, TypeError, ValueError):
-        current = ""
-    if isinstance(current, str) and current.strip():
-        return current.strip()
-    keys = config.get("key", [])
-    if isinstance(keys, str) and keys.strip():
-        return keys.strip()
-    if isinstance(keys, list):
-        for key in keys:
-            if isinstance(key, str) and key.strip():
-                return key.strip()
-    api_key = config.get("api_key")
-    return api_key.strip() if isinstance(api_key, str) else ""
 
 
 def _response_url(value: Any) -> str:
@@ -173,53 +150,6 @@ def extract_image_result(payload: Any) -> tuple[bytes | None, str]:
             "供应商仅返回异步任务编号，当前版本不支持任务轮询。",
         )
     raise ImageProviderError("unsupported_response", "供应商返回格式不受支持。")
-
-
-def _provider_protocol(config: Mapping[str, Any]) -> str:
-    configured = _text(config.get("image_protocol") or config.get("protocol")).lower()
-    if configured in {"openai_images", "openai_responses"}:
-        return configured
-    provider_type = _text(config.get("type")).lower()
-    if provider_type == "openai_responses":
-        return "openai_responses"
-    if provider_type == "openai_images":
-        return "openai_images"
-    raise ImageProviderError(
-        "unsupported_provider",
-        "所选 AstrBot Provider 不是明确支持的 OpenAI Images/Responses 生图接口。",
-    )
-
-
-def settings_from_astrbot_provider(
-    provider_id: str,
-    provider: Any,
-    model_override: str,
-    timeout: int,
-) -> ProviderSettings:
-    if provider is None:
-        raise ImageProviderError("not_configured", "未找到所选 AstrBot Provider。")
-    config = _provider_config(provider)
-    protocol = _provider_protocol(config)
-    base_url = _normalise_base_url(
-        _text(config.get("api_base")),
-        bool(config.get("allow_insecure_http", False)),
-    )
-    api_key = _first_key(provider, config)
-    model = _text(model_override) or _text(config.get("model"))
-    if not api_key or not model:
-        raise ImageProviderError(
-            "invalid_config",
-            "AstrBot Provider 缺少 API Key 或生图模型 ID。",
-        )
-    return ProviderSettings(
-        provider_id=provider_id,
-        protocol=protocol,
-        base_url=base_url,
-        api_key=api_key,
-        model=model,
-        timeout=timeout,
-        allow_insecure_http=bool(config.get("allow_insecure_http", False)),
-    )
 
 
 def settings_from_manual(

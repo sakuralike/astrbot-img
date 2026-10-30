@@ -119,12 +119,11 @@ class FakeConfig(dict):
         self.save_count += 1
 
 
-def _plugin(providers=None, current_id="", provider_mode="astrbot"):
+def _plugin(providers=None, current_id=""):
     plugin = object.__new__(main_module.ImageGenerationPlugin)
     plugin.config = FakeConfig(
         manual_providers=list(providers or []),
         manual_provider_id=current_id,
-        provider_mode=provider_mode,
         request_timeout=10,
     )
     plugin._model_cache = {}
@@ -180,6 +179,14 @@ def test_provider_get_redacts_api_key_and_sensitive_url_parts():
     assert result["providers"][0]["models_endpoint"] == "https://example.com/models"
 
 
+def test_provider_get_response_does_not_expose_framework_source():
+    plugin = _plugin([_payload(api_key="secret")], current_id="demo")
+
+    result = _json(asyncio.run(plugin.web_get_providers()))
+
+    assert "provider_mode" not in result
+
+
 def test_save_provider_adds_manual_provider_and_sets_current():
     plugin = _plugin()
     main_module.request = FakeRequest(_payload(model="custom-image-model"))
@@ -187,7 +194,7 @@ def test_save_provider_adds_manual_provider_and_sets_current():
     response = asyncio.run(plugin.web_save_provider())
 
     assert response.status_code == 200
-    assert plugin.config["provider_mode"] == "manual"
+    assert "provider_mode" not in plugin.config
     assert plugin.config["manual_provider_id"] == "demo"
     saved = plugin.config["manual_providers"][0]
     assert saved["api_key"] == "new-secret"
@@ -205,7 +212,6 @@ def test_edit_preserves_empty_key_and_current_selection():
             }
         ],
         current_id="demo",
-        provider_mode="manual",
     )
     main_module.request = FakeRequest(
         _payload(original_id="demo", api_key="", model="custom-model", set_current=False)
@@ -217,8 +223,68 @@ def test_edit_preserves_empty_key_and_current_selection():
     assert plugin.config["manual_providers"][0]["api_key"] == "existing-secret"
     assert plugin.config["manual_providers"][0]["model"] == "custom-model"
     assert plugin.config["manual_provider_id"] == "demo"
-    assert plugin.config["provider_mode"] == "manual"
     assert "existing-secret" not in response.body.decode()
+
+
+def test_legacy_framework_fields_are_ignored_for_runtime_selection():
+    plugin = _plugin([_payload(api_key="manual-secret", model="manual-model")], current_id="demo")
+    plugin.config.update(
+        provider_mode="astrbot",
+        astrbot_provider_id="framework-provider",
+        astrbot_model_id="framework-model",
+    )
+
+    settings = plugin._provider_settings()
+
+    assert settings.provider_id == "demo"
+    assert settings.model == "manual-model"
+    assert settings.api_key == "manual-secret"
+
+
+def test_missing_manual_provider_has_manual_configuration_error():
+    plugin = _plugin()
+
+    with pytest.raises(main_module.ImageProviderError) as error:
+        plugin._provider_settings()
+
+    assert error.value.code == "not_configured"
+    assert "插件手动供应商" in main_module._display_error(error.value)
+
+
+def test_save_provider_does_not_clear_existing_models_on_empty_form_list():
+    plugin = _plugin(
+        [
+            _payload(
+                api_key="existing-secret",
+                model="old-model",
+                models=["old-model", "second-model"],
+            )
+        ],
+        current_id="demo",
+    )
+    main_module.request = FakeRequest(
+        _payload(
+            original_id="demo",
+            api_key="",
+            model="old-model",
+            models=[],
+            set_current=False,
+        )
+    )
+
+    response = asyncio.run(plugin.web_save_provider())
+
+    assert response.status_code == 200
+    assert plugin.config["manual_providers"][0]["models"] == [
+        "old-model",
+        "second-model",
+    ]
+    settings = main_module.manual_provider_settings(
+        plugin.config["manual_providers"],
+        plugin.config["manual_provider_id"],
+        30,
+    )
+    assert settings.model == "old-model"
 
 
 def test_renaming_provider_preserves_key_and_updates_current_id():
@@ -229,7 +295,6 @@ def test_renaming_provider_preserves_key_and_updates_current_id():
             }
         ],
         current_id="demo",
-        provider_mode="manual",
     )
     main_module.request = FakeRequest(
         _payload(original_id="demo", id="renamed", api_key="", set_current=False)
@@ -365,7 +430,6 @@ def test_delete_provider_clears_current_and_secret_cache():
             _payload(id="next", name="Next", api_key="other-secret"),
         ],
         current_id="demo",
-        provider_mode="manual",
     )
     plugin._model_cache = {"demo": ["image-model"]}
     main_module.request = FakeRequest({"id": "demo"})

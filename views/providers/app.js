@@ -88,6 +88,13 @@ function selectedProvider() {
   return providers.find((provider) => provider.id === fields.originalId.value) || null;
 }
 
+function preferredProvider() {
+  return providers.find((provider) => provider.id === currentProviderId)
+    || providers.find((provider) => provider.enabled !== false)
+    || providers[0]
+    || null;
+}
+
 function loadProvider(provider) {
   fields.originalId.value = provider.id;
   fields.id.value = provider.id;
@@ -169,10 +176,10 @@ async function loadConfig() {
   const result = await bridge.apiGet("providers");
   providers = Array.isArray(result.providers) ? result.providers : [];
   currentProviderId = result.current_provider_id || "";
-  document.getElementById("source-status").textContent =
-    result.provider_mode === "manual" ? "正在使用插件手动供应商" : "当前生图来源为 AstrBot Provider";
+  document.getElementById("source-status").textContent = "仅使用插件手动供应商";
   renderProviders();
-  if (providers.length) loadProvider(providers[0]);
+  const provider = preferredProvider();
+  if (provider) loadProvider(provider);
   else newProvider();
 }
 
@@ -221,7 +228,8 @@ deleteButton.addEventListener("click", async () => {
     providers = providers.filter((provider) => provider.id !== providerId);
     currentProviderId = result.current_provider_id || "";
     renderProviders();
-    if (providers.length) loadProvider(providers[0]);
+    const provider = preferredProvider();
+    if (provider) loadProvider(provider);
     else newProvider();
     setFeedback("供应商已删除", "success");
   } catch (error) {

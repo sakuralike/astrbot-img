@@ -4,33 +4,6 @@
     "description": "启用独立生图",
     "default": true
   },
-  "provider_mode": {
-    "type": "string",
-    "description": "生图供应商来源",
-    "default": "astrbot",
-    "options": [
-      "astrbot",
-      "manual"
-    ],
-    "labels": [
-      "AstrBot 已配置 Provider",
-      "插件手动供应商"
-    ],
-    "hint": "AstrBot v4.29.3 没有统一的原生生图 Provider API；AstrBot 模式会复用选定 Provider 的地址、密钥和模型，并按明确的 Images/Responses 协议请求。"
-  },
-  "astrbot_provider_id": {
-    "type": "string",
-    "description": "AstrBot 生图 Provider",
-    "default": "",
-    "_special": "select_provider",
-    "hint": "请选择已配置的 OpenAI Images 或 OpenAI Responses 兼容 Provider。留空时使用第一个聊天 Provider。"
-  },
-  "astrbot_model_id": {
-    "type": "string",
-    "description": "AstrBot 生图模型 ID",
-    "default": "",
-    "hint": "建议填写供应商明确支持生图的模型 ID；留空使用 Provider 当前模型。"
-  },
   "generate_command": {
     "type": "string",
     "description": "生图命令",

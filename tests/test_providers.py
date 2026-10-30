@@ -7,7 +7,6 @@ import sys
 import types
 from dataclasses import replace
 from pathlib import Path
-from typing import ClassVar
 
 import aiohttp
 import pytest
@@ -103,63 +102,6 @@ def test_cached_manual_models_fill_missing_model():
         {"demo": ["image-model"]},
     )
     assert settings.model == "image-model"
-
-
-def test_astrbot_provider_reads_merged_connection_info():
-    class Provider:
-        provider_config: ClassVar[dict[str, object]] = {
-            "type": "openai_responses",
-            "api_base": "https://example.com/v1",
-            "model": "image-model",
-            "key": ["secret"],
-        }
-
-        def get_current_key(self):
-            return "secret"
-
-    settings = providers.settings_from_astrbot_provider(
-        "provider-1",
-        Provider(),
-        "",
-        30,
-    )
-    assert settings.protocol == "openai_responses"
-    assert settings.model == "image-model"
-
-
-def test_astrbot_provider_accepts_string_api_key():
-    class Provider:
-        provider_config: ClassVar[dict[str, object]] = {
-            "type": "openai_images",
-            "api_base": "https://example.com/v1",
-            "model": "image-model",
-            "api_key": "secret",
-        }
-
-    settings = providers.settings_from_astrbot_provider(
-        "provider-1",
-        Provider(),
-        "",
-        30,
-    )
-    assert settings.api_key == "secret"
-
-
-def test_plain_chat_provider_is_not_assumed_to_generate_images():
-    class Provider:
-        provider_config: ClassVar[dict[str, object]] = {
-            "type": "openai_chat_completion",
-            "api_base": "https://example.com/v1",
-            "model": "chat-model",
-            "key": ["secret"],
-        }
-
-        def get_current_key(self):
-            return "secret"
-
-    with pytest.raises(providers.ImageProviderError) as error:
-        providers.settings_from_astrbot_provider("provider-1", Provider(), "", 30)
-    assert error.value.code == "unsupported_provider"
 
 
 def test_http_url_is_rejected_by_default():
