@@ -5,8 +5,10 @@ import importlib.util
 import json
 import logging
 import sys
+import tempfile
 import types
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import aiohttp
 import pytest
@@ -187,9 +189,12 @@ def test_provider_get_response_does_not_expose_framework_source():
     assert "provider_mode" not in result
 
 
-def test_save_provider_adds_manual_provider_and_sets_current():
+@pytest.mark.parametrize("protocol", ["openai_images", "openai_responses"])
+def test_save_provider_adds_manual_provider_and_sets_current(protocol):
     plugin = _plugin()
-    main_module.request = FakeRequest(_payload(model="custom-image-model"))
+    main_module.request = FakeRequest(
+        _payload(protocol=protocol, model="custom-image-model")
+    )
 
     response = asyncio.run(plugin.web_save_provider())
 
@@ -199,12 +204,92 @@ def test_save_provider_adds_manual_provider_and_sets_current():
     saved = plugin.config["manual_providers"][0]
     assert saved["api_key"] == "new-secret"
     assert saved["model"] == "custom-image-model"
+    assert saved["protocol"] == saved["__template_key"] == protocol
     assert _json(response)["provider"]["has_api_key"] is True
     assert "new-secret" not in response.body.decode()
     assert plugin.config.save_count == 1
 
 
-def test_edit_preserves_empty_key_and_current_selection():
+@pytest.mark.parametrize("protocol", ["openai_images", "openai_responses"])
+def test_get_providers_is_read_only_and_recognizes_native_templates(protocol):
+    native = _payload(
+        protocol=protocol,
+        __template_key=protocol,
+        api_key="existing-secret",
+        model="image-model",
+        models=["image-model", "other-model"],
+    )
+    native.pop("protocol")
+    legacy = _payload(id="legacy", protocol=protocol, model="old-model")
+    plugin = _plugin([native, legacy], current_id="demo")
+    before = json.loads(json.dumps(plugin.config))
+
+    result = _json(asyncio.run(plugin.web_get_providers()))
+
+    assert plugin.config == before
+    assert plugin.config.save_count == 0
+    assert result["providers"][0]["protocol"] == protocol
+    assert result["providers"][0]["model"] == "image-model"
+    assert result["providers"][0]["models"] == ["image-model", "other-model"]
+    assert result["providers"][1]["protocol"] == protocol
+    assert result["current_provider_id"] == "demo"
+    assert "existing-secret" not in json.dumps(result)
+    assert plugin._provider_settings().protocol == protocol
+    assert plugin._provider_settings().model == "image-model"
+
+
+@pytest.mark.parametrize("protocol", ["openai_images", "openai_responses"])
+@pytest.mark.parametrize("enabled", [True, False])
+def test_initialize_repairs_legacy_templates_once_without_requests(protocol, enabled):
+    plugin = _plugin(
+        [
+            _payload(
+                protocol=protocol,
+                api_key="existing-secret",
+                model="chosen-model",
+                models=["other-model", "chosen-model"],
+            ),
+            _payload(id="empty", protocol=protocol, __template_key=""),
+        ],
+        current_id="demo",
+    )
+    plugin.config["enabled"] = enabled
+    expected = json.loads(json.dumps(plugin.config))
+    for item in expected["manual_providers"]:
+        item["__template_key"] = protocol
+    plugin._http = AsyncMock(side_effect=AssertionError("Unexpected HTTP request"))
+
+    asyncio.run(plugin.initialize())
+
+    assert plugin.config == expected
+    assert plugin.config.save_count == 1
+    asyncio.run(plugin.initialize())
+    assert plugin.config == expected
+    assert plugin.config.save_count == 1
+    plugin._http.assert_not_awaited()
+    assert plugin._provider_settings().model == "chosen-model"
+
+
+def test_initialize_preserves_existing_templates_and_unknown_protocols():
+    plugin = _plugin(
+        [
+            _payload(__template_key="openai_images"),
+            _payload(id="native", protocol="", __template_key="openai_responses"),
+            _payload(id="unknown-template", __template_key="custom_template"),
+            _payload(id="unknown-protocol", protocol="unsupported"),
+            _payload(id="conflicting", __template_key="openai_responses"),
+        ]
+    )
+    before = json.loads(json.dumps(plugin.config))
+
+    asyncio.run(plugin.initialize())
+
+    assert plugin.config == before
+    assert plugin.config.save_count == 0
+
+
+@pytest.mark.parametrize("protocol", ["openai_images", "openai_responses"])
+def test_edit_preserves_empty_key_and_current_selection(protocol):
     plugin = _plugin(
         [
             {
@@ -214,7 +299,13 @@ def test_edit_preserves_empty_key_and_current_selection():
         current_id="demo",
     )
     main_module.request = FakeRequest(
-        _payload(original_id="demo", api_key="", model="custom-model", set_current=False)
+        _payload(
+            original_id="demo",
+            protocol=protocol,
+            api_key="",
+            model="custom-model",
+            set_current=False,
+        )
     )
 
     response = asyncio.run(plugin.web_save_provider())
@@ -222,8 +313,91 @@ def test_edit_preserves_empty_key_and_current_selection():
     assert response.status_code == 200
     assert plugin.config["manual_providers"][0]["api_key"] == "existing-secret"
     assert plugin.config["manual_providers"][0]["model"] == "custom-model"
+    assert plugin.config["manual_providers"][0]["protocol"] == protocol
+    assert plugin.config["manual_providers"][0]["__template_key"] == protocol
     assert plugin.config["manual_provider_id"] == "demo"
     assert "existing-secret" not in response.body.decode()
+
+
+@pytest.mark.parametrize("protocol", ["openai_images", "openai_responses"])
+def test_saved_provider_survives_reload_and_generates_with_selected_model(protocol):
+    async def run():
+        calls = []
+
+        async def handler(request):
+            calls.append((request.path, await request.json()))
+            if protocol == "openai_images":
+                return web.json_response({"data": [{"b64_json": "cG5nLWRhdGE="}]})
+            return web.json_response(
+                {"output": [{"type": "image_generation_call", "result": "cG5nLWRhdGE="}]}
+            )
+
+        app = web.Application()
+        app.router.add_post("/{tail:.*}", handler)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        restored = None
+        try:
+            site = web.TCPSite(runner, "127.0.0.1", 0)
+            await site.start()
+            port = site._server.sockets[0].getsockname()[1]
+            with tempfile.TemporaryDirectory(prefix=".test-providers-", dir=ROOT) as temp:
+                path = Path(temp) / "config.json"
+
+                class PersistentConfig(FakeConfig):
+                    def save_config(self):
+                        super().save_config()
+                        path.write_text(json.dumps(self), encoding="utf-8")
+
+                plugin = _plugin()
+                plugin.config = PersistentConfig(plugin.config)
+                main_module.request = FakeRequest(
+                    _payload(
+                        protocol=protocol,
+                        base_url=f"http://127.0.0.1:{port}/v1",
+                        allow_insecure_http=True,
+                        model="chosen-model",
+                        models=["other-model", "chosen-model"],
+                    )
+                )
+                response = await plugin.web_save_provider()
+                assert response.status_code == 200
+                stored = json.loads(path.read_text(encoding="utf-8"))
+                assert stored["manual_providers"][0]["__template_key"] == protocol
+
+                restored = _plugin()
+                restored.config = PersistentConfig(stored)
+                await restored.initialize()
+                assert restored.config.save_count == 0
+                result = _json(await restored.web_get_providers())
+                assert result["current_provider_id"] == "demo"
+                assert result["providers"][0]["models"] == [
+                    "other-model",
+                    "chosen-model",
+                ]
+                assert result["providers"][0]["model"] == "chosen-model"
+                assert result["providers"][0]["protocol"] == protocol
+                assert not calls
+                image = await restored._generate(
+                    "draw a cat", restored._provider_settings()
+                )
+                assert image == b"png-data"
+                assert len(calls) == 1
+                endpoint, payload = calls[0]
+                assert payload["model"] == "chosen-model"
+                if protocol == "openai_images":
+                    assert endpoint == "/v1/images/generations"
+                    assert payload["prompt"] == "draw a cat"
+                else:
+                    assert endpoint == "/v1/responses"
+                    assert payload["input"] == "draw a cat"
+                assert json.loads(path.read_text(encoding="utf-8")) == stored
+        finally:
+            if restored is not None:
+                await restored.terminate()
+            await runner.cleanup()
+
+    asyncio.run(run())
 
 
 def test_legacy_framework_fields_are_ignored_for_runtime_selection():

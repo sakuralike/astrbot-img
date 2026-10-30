@@ -37,6 +37,7 @@ DEFAULT_MAX_PROMPT_CHARS = 1000
 DEFAULT_GENERATE_COMMAND = "生图"
 DEFAULT_MODELS_COMMAND = "获取生图模型"
 MAX_IMAGE_BYTES = 25 * 1024 * 1024
+_MANUAL_PROTOCOLS = {"openai_images", "openai_responses"}
 
 
 def _bounded_int(value: Any, default: int, minimum: int, maximum: int) -> int:
@@ -144,6 +145,32 @@ class ImageGenerationPlugin(Star):
             "Delete image provider",
         )
         self._configure_commands()
+
+    async def initialize(self) -> None:
+        if self._migrate_manual_provider_templates():
+            await self._save_config()
+
+    @staticmethod
+    def _provider_template_key(item: Mapping[str, Any]) -> str:
+        protocol = str(item.get("protocol", "") or "").strip().lower()
+        if protocol:
+            return protocol if protocol in _MANUAL_PROTOCOLS else ""
+        template_key = str(item.get("__template_key", "") or "").strip().lower()
+        return template_key if template_key in _MANUAL_PROTOCOLS else ""
+
+    def _migrate_manual_provider_templates(self) -> bool:
+        providers = self.config.get("manual_providers", [])
+        if not isinstance(providers, list):
+            return False
+        changed = False
+        for item in providers:
+            if not isinstance(item, dict) or item.get("__template_key"):
+                continue
+            template_key = self._provider_template_key(item)
+            if template_key:
+                item["__template_key"] = template_key
+                changed = True
+        return changed
 
     def _configure_commands(self) -> None:
         try:
@@ -350,6 +377,7 @@ class ImageGenerationPlugin(Star):
 
     def _public_provider(self, item: Mapping[str, Any]) -> dict[str, Any]:
         provider_id = str(item.get("id", "") or "").strip()
+        protocol = self._provider_template_key(item)
         configured_models = item.get("models", [])
         if not isinstance(configured_models, list):
             configured_models = []
@@ -364,7 +392,7 @@ class ImageGenerationPlugin(Star):
         return {
             "id": provider_id,
             "name": str(item.get("name", "") or ""),
-            "protocol": str(item.get("protocol", "") or ""),
+            "protocol": protocol,
             "base_url": self._public_url(item.get("base_url", "")),
             "model": str(item.get("model", "") or ""),
             "models": [
@@ -487,6 +515,7 @@ class ImageGenerationPlugin(Star):
             "id": provider_id,
             "name": name,
             "protocol": protocol,
+            "__template_key": protocol,
             "base_url": base_url,
             "api_key": api_key,
             "model": model,
