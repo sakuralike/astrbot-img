@@ -62,11 +62,11 @@ def extract_prompt(message: str, command: str = "生图") -> str:
     command = command.strip().lstrip("/").strip() if isinstance(command, str) else ""
     if not command or any(char.isspace() for char in command):
         command = "生图"
-    prefixes = {"/生图", f"/{command}"}
+    prefixes = {"生图", "/生图", command, f"/{command}"}
     for prefix in sorted(prefixes, key=len, reverse=True):
         if text == prefix:
             return ""
-        if text.startswith(f"{prefix} "):
+        if text.startswith(prefix) and text[len(prefix) : len(prefix) + 1].isspace():
             return text[len(prefix) :].strip()
     return text
 
@@ -719,6 +719,46 @@ class ImageGenerationPlugin(Star):
             return await self._download_image(image_url, settings)
         raise ImageProviderError("unsupported_response", "供应商没有返回图片。")
 
+    async def _upload_to_moxtu(
+        self, event: AstrMessageEvent, image_bytes: bytes
+    ) -> None:
+        if self.config.get("auto_upload_to_moxtu", False) is not True:
+            return
+        unknown = "图床保存结果暂无法确认，未自动重试。"
+        message = "图片已生成，但未自动上传：Moxtu 插件未安装或未启用。"
+        upload_started = False
+        try:
+            metadata = self.context.get_registered_star("astrbot_plugin_moxtu_gallery")
+            if metadata is not None and metadata.activated and metadata.star_cls:
+                upload = getattr(metadata.star_cls, "upload_generated_image", None)
+                if not callable(upload):
+                    message = "图片已生成，但未自动上传：请更新 Moxtu 插件以支持生图联动。"
+                else:
+                    upload_started = True
+                    result = await upload(event, image_bytes)
+                    status = result.get("status") if isinstance(result, dict) else None
+                    if status == "success":
+                        message = "图片已自动上传到 Moxtu 专属相册。"
+                    elif status == "existing":
+                        message = "这张图片已保存到 Moxtu 专属相册，无需重复上传。"
+                    elif status in {"failed", "skipped"}:
+                        detail = result.get("message")
+                        message = "图片已生成，但未自动上传：" + (
+                            detail.strip()
+                            if isinstance(detail, str) and detail.strip()
+                            else "请管理员检查 Moxtu 插件配置。"
+                        )
+                    else:
+                        message = unknown
+        except Exception as error:
+            logger.warning("Moxtu 自动上传异常：%s", type(error).__name__)
+            if upload_started:
+                message = unknown
+        try:
+            await self._send_text(event, message)
+        except Exception as error:
+            logger.warning("Moxtu 上传结果回复失败：%s", type(error).__name__)
+
     @filter.command("生图")
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)
     async def generate(self, event: AstrMessageEvent) -> None:
@@ -760,12 +800,13 @@ class ImageGenerationPlugin(Star):
             return
         self._mark_cooldown(event, now)
         request_succeeded = False
+        image_bytes: bytes | None = None
         async with self._semaphore:
             try:
                 image_bytes = await self._generate(prompt, settings)
                 path = self._temp_dir / f"{uuid4().hex}.png"
-                path.write_bytes(image_bytes)
                 try:
+                    path.write_bytes(image_bytes)
                     await self._send_image(event, path)
                 finally:
                     with contextlib.suppress(FileNotFoundError):
@@ -774,12 +815,17 @@ class ImageGenerationPlugin(Star):
             except ImageProviderError as error:
                 logger.warning("AstrBot 生图请求失败：%s", error.code)
                 await self._send_text(event, _display_error(error))
-            except (OSError, ValueError, TypeError):
-                logger.exception("AstrBot 生图消息发送失败")
-                await self._send_text(event, "图片生成成功，但发送图片失败。")
+            except Exception as error:
+                if image_bytes is None:
+                    raise
+                logger.warning("AstrBot 生图消息发送失败：%s", type(error).__name__)
+                with contextlib.suppress(Exception):
+                    await self._send_text(event, "图片生成成功，但发送图片失败。")
             finally:
                 if not request_succeeded:
                     self._clear_cooldown(event)
+            if image_bytes is not None:
+                await self._upload_to_moxtu(event, image_bytes)
 
     def _is_admin(self, event: AstrMessageEvent) -> bool:
         try:

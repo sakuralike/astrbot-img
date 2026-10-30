@@ -4,6 +4,12 @@
     "description": "启用独立生图",
     "default": true
   },
+  "auto_upload_to_moxtu": {
+    "type": "bool",
+    "description": "自动上传生成图片到 Moxtu",
+    "default": false,
+    "hint": "需要启用支持联动的 Moxtu 插件；沿用其相册、公开设置和上传权限，并回复上传结果。"
+  },
   "generate_command": {
     "type": "string",
     "description": "生图命令",
