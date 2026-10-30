@@ -18,7 +18,7 @@ async def verify(image_source: Path, moxtu_source: Path, run_root: Path) -> int:
     import aiohttp
     from PIL import Image as PillowImage
 
-    from astrbot.api.message_components import Image, Plain
+    from astrbot.api.message_components import At, Image, Plain
     from astrbot.api.star import Context
     from astrbot.core.pipeline.context import PipelineContext
     from astrbot.core.pipeline.process_stage.method.star_request import (
@@ -85,6 +85,8 @@ async def verify(image_source: Path, moxtu_source: Path, run_root: Path) -> int:
         async def send(self, chain):
             assert chain.use_markdown_ is False
             if any(isinstance(part, Image) for part in chain.chain):
+                mentions = [part.qq for part in chain.chain if isinstance(part, At)]
+                assert mentions == [self.get_sender_id()]
                 timeline.append("send-image")
                 part = next(part for part in chain.chain if isinstance(part, Image))
                 assert Path(part.path).read_bytes() == image_bytes

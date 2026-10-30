@@ -708,7 +708,11 @@ class ImageGenerationPlugin(Star):
         await event.send(MessageChain().message(text).use_markdown(False))
 
     async def _send_image(self, event: AstrMessageEvent, path: Path) -> None:
-        await event.send(MessageChain().file_image(str(path)).use_markdown(False))
+        chain = MessageChain()
+        sender_id = str(event.get_sender_id() or "").strip()
+        if sender_id:
+            chain.chain.append(At(qq=sender_id))
+        await event.send(chain.file_image(str(path)).use_markdown(False))
 
     async def _generate(self, prompt: str, settings: ProviderSettings) -> bytes:
         session = await self._http()

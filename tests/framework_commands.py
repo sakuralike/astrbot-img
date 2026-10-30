@@ -187,7 +187,10 @@ async def verify(source: Path, initial_config: dict) -> int:
                 ), name
             elif expected == "image":
                 assert len(event.sent) == 1, name
-                assert isinstance(event.sent[0].chain[0], Image), name
+                assert len(event.sent[0].chain) == 2, name
+                assert isinstance(event.sent[0].chain[0], At), name
+                assert event.sent[0].chain[0].qq == event.get_sender_id(), name
+                assert isinstance(event.sent[0].chain[1], Image), name
                 assert plugin._cooldowns, name
             else:
                 expected_reply = {

@@ -43,6 +43,91 @@ def _metadata(upload):
     )
 
 
+@pytest.fixture
+def image_message_chain(monkeypatch):
+    class MessageChain:
+        def __init__(self):
+            self.chain = []
+            self.use_markdown_ = None
+
+        def file_image(self, path):
+            self.chain.append(types.SimpleNamespace(file=path))
+            return self
+
+        def use_markdown(self, enabled):
+            self.use_markdown_ = enabled
+            return self
+
+    monkeypatch.setattr(main_module, "MessageChain", MessageChain)
+    monkeypatch.setattr(main_module, "At", types.SimpleNamespace)
+
+
+@pytest.mark.parametrize("command", ["生图", "画图"])
+def test_concurrent_image_replies_mention_each_requester(
+    tmp_path, image_message_chain, command
+):
+    async def run():
+        plugin = _configured_plugin(tmp_path, enabled=False)
+        del plugin._send_image
+        plugin.generate_command = command
+        first = _event()
+        second = _event()
+        first.get_sender_id = lambda: "member-openid"
+        second.get_sender_id = lambda: "123456"
+        first.get_message_str = lambda: f"{command} first"
+        second.get_message_str = lambda: f"{command} second"
+        second_started = asyncio.Event()
+
+        async def generate(prompt, settings):
+            if prompt == "first":
+                await second_started.wait()
+            else:
+                second_started.set()
+            return prompt.encode()
+
+        def capture(sender, data):
+            async def send(chain):
+                assert len(chain.chain) == 2
+                assert chain.chain[0].qq == sender
+                assert Path(chain.chain[1].file).read_bytes() == data
+                assert chain.use_markdown_ is False
+            return AsyncMock(side_effect=send)
+
+        first.send = capture("member-openid", b"first")
+        second.send = capture("123456", b"second")
+        plugin._generate.side_effect = generate
+        await asyncio.wait_for(
+            asyncio.gather(plugin.generate(first), plugin.generate(second)), 2
+        )
+        first.send.assert_awaited_once()
+        second.send.assert_awaited_once()
+        plugin._send_text.assert_not_awaited()
+        assert plugin._semaphore._value == 2
+        assert list(tmp_path.iterdir()) == []
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("sender_id", ["", None, "   "])
+def test_image_reply_without_sender_still_sends_image(
+    tmp_path, image_message_chain, sender_id
+):
+    plugin = _configured_plugin(tmp_path, enabled=False)
+    del plugin._send_image
+    event = _event()
+    event.get_sender_id = lambda: sender_id
+
+    async def send(chain):
+        assert len(chain.chain) == 1
+        assert Path(chain.chain[0].file).read_bytes() == b"generated-image"
+        assert chain.use_markdown_ is False
+
+    event.send = AsyncMock(side_effect=send)
+    asyncio.run(plugin.generate(event))
+    event.send.assert_awaited_once()
+    assert list(tmp_path.iterdir()) == []
+
+
 def test_moxtu_upload_is_opt_in():
     schema = json.loads(
         (Path(__file__).resolve().parents[1] / "_conf_schema.json").read_text(
@@ -165,8 +250,11 @@ def test_generation_failure_does_not_upload(tmp_path):
     plugin = _configured_plugin(tmp_path)
     plugin._generate.side_effect = main_module.ImageProviderError("timeout")
     asyncio.run(plugin.generate(_event()))
+    plugin._send_image.assert_not_awaited()
+    plugin._send_text.assert_awaited_once()
     plugin.context.get_registered_star.assert_not_called()
     assert not plugin._cooldowns
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_lookup_is_refreshed_for_each_request(tmp_path):
